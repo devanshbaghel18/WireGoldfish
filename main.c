@@ -27,6 +27,18 @@ typedef struct {
 IPTracker trackers[MAX_IPS];
 int tracker_count = 0;
 
+// SYN Flood detection
+typedef struct {
+    char ip[16];
+    int syn_count;
+    int ack_count;
+    time_t first_seen;
+    int alerted;
+} SYNTracker;
+
+SYNTracker syn_trackers[MAX_IPS];
+int syn_tracker_count = 0;
+
 void check_port_scan(char *src_ip, int dst_port) {
     time_t now = time(NULL);
 
@@ -74,6 +86,54 @@ void check_port_scan(char *src_ip, int dst_port) {
         printf("    Source IP: %s\n", src_ip);
         printf("    Ports hit: %d in %d seconds\n\n",
                tracker->port_count, TIME_WINDOW);
+    }
+}
+
+void check_syn_flood(char *src_ip, int syn, int ack) {
+    time_t now = time(NULL);
+
+    // Find existing tracker
+    SYNTracker *tracker = NULL;
+    for (int i = 0; i < syn_tracker_count; i++) {
+        if (strcmp(syn_trackers[i].ip, src_ip) == 0) {
+            tracker = &syn_trackers[i];
+            break;
+        }
+    }
+
+    // New IP — create tracker
+    if (tracker == NULL && syn_tracker_count < MAX_IPS) {
+        tracker = &syn_trackers[syn_tracker_count++];
+        strcpy(tracker->ip, src_ip);
+        tracker->syn_count = 0;
+        tracker->ack_count = 0;
+        tracker->first_seen = now;
+        tracker->alerted = 0;
+    }
+
+    if (tracker == NULL) return;
+
+    // Reset if time window expired
+    if (now - tracker->first_seen > TIME_WINDOW) {
+        tracker->syn_count = 0;
+        tracker->ack_count = 0;
+        tracker->first_seen = now;
+        tracker->alerted = 0;
+    }
+
+    // Count SYNs and ACKs
+    if (syn && !ack) tracker->syn_count++;
+    if (ack)         tracker->ack_count++;
+
+    // ALERT if SYNs >> ACKs
+    if (!tracker->alerted &&
+        tracker->syn_count > 10 &&
+        tracker->syn_count > tracker->ack_count * 3) {
+        tracker->alerted = 1;
+        printf("\n⚠️  SYN FLOOD DETECTED!\n");
+        printf("    Source IP: %s\n", src_ip);
+        printf("    SYNs: %d  ACKs: %d\n\n",
+            tracker->syn_count, tracker->ack_count);
     }
 }
 
@@ -137,6 +197,7 @@ int main()
                        tcp->syn, tcp->ack, tcp->fin);
 
                 check_port_scan(src_ip, ntohs(tcp->dest));
+                check_syn_flood(src_ip, tcp->syn, tcp->ack);
             }
 
             // UDP
