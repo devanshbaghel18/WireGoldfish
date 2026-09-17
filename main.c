@@ -9,6 +9,73 @@
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
+#include <time.h>
+
+// Port scan detection
+#define MAX_IPS 256
+#define SCAN_THRESHOLD 15
+#define TIME_WINDOW 10
+
+typedef struct {
+    char ip[16];
+    int ports[1024];
+    int port_count;
+    time_t first_seen;
+    int alerted;
+} IPTracker;
+
+IPTracker trackers[MAX_IPS];
+int tracker_count = 0;
+
+void check_port_scan(char *src_ip, int dst_port) {
+    time_t now = time(NULL);
+
+    // Find existing tracker for this IP
+    IPTracker *tracker = NULL;
+    for (int i = 0; i < tracker_count; i++) {
+        if (strcmp(trackers[i].ip, src_ip) == 0) {
+            tracker = &trackers[i];
+            break;
+        }
+    }
+
+    // New IP — create tracker
+    if (tracker == NULL && tracker_count < MAX_IPS) {
+        tracker = &trackers[tracker_count++];
+        strcpy(tracker->ip, src_ip);
+        tracker->port_count = 0;
+        tracker->first_seen = now;
+        tracker->alerted = 0;
+    }
+
+    if (tracker == NULL) return;
+
+    // Reset if time window expired
+    if (now - tracker->first_seen > TIME_WINDOW) {
+        tracker->port_count = 0;
+        tracker->first_seen = now;
+        tracker->alerted = 0;
+    }
+
+    // Check if port already seen
+    for (int i = 0; i < tracker->port_count; i++) {
+        if (tracker->ports[i] == dst_port) return;
+    }
+
+    // Add new port
+    if (tracker->port_count < 1024) {
+        tracker->ports[tracker->port_count++] = dst_port;
+    }
+
+    // ALERT if threshold exceeded
+    if (!tracker->alerted && tracker->port_count > SCAN_THRESHOLD) {
+        tracker->alerted = 1;
+        printf("\n⚠️  PORT SCAN DETECTED!\n");
+        printf("    Source IP: %s\n", src_ip);
+        printf("    Ports hit: %d in %d seconds\n\n",
+               tracker->port_count, TIME_WINDOW);
+    }
+}
 
 int main()
 {
@@ -24,7 +91,7 @@ int main()
 
     while (1)
     {
-        int len = recvfrom(sock, buffer, sizeof(buffer), 0, NULL, NULL);
+        ssize_t len = recvfrom(sock, buffer, sizeof(buffer), 0, NULL, NULL);
         if (len < 0)
         {
             perror("recvfrom");
@@ -46,13 +113,15 @@ int main()
         { // IPv4
             struct iphdr *ip = (struct iphdr *)(buffer + sizeof(struct ethhdr));
 
-            struct in_addr src, dst;
-            src.s_addr = ip->saddr;
-            dst.s_addr = ip->daddr;
+            char src_ip[INET_ADDRSTRLEN];
+            char dst_ip[INET_ADDRSTRLEN];
+
+            inet_ntop(AF_INET, &ip->saddr, src_ip, sizeof(src_ip));
+            inet_ntop(AF_INET, &ip->daddr, dst_ip, sizeof(dst_ip));
 
             printf("  IPv4:\n");
-            printf("    Src IP: %s\n", inet_ntoa(src));
-            printf("    Dst IP: %s\n", inet_ntoa(dst));
+            printf("    Src IP: %s\n", src_ip);
+            printf("    Dst IP: %s\n", dst_ip);
             printf("    Protocol: %d\n", ip->protocol);
             printf("    TTL: %d\n\n", ip->ttl);
 
@@ -66,6 +135,8 @@ int main()
                 printf("      Dst Port: %d\n", ntohs(tcp->dest));
                 printf("      SYN: %d ACK: %d FIN: %d\n",
                        tcp->syn, tcp->ack, tcp->fin);
+
+                check_port_scan(src_ip, ntohs(tcp->dest));
             }
 
             // UDP
